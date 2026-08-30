@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# This CI runs UNPRIVILEGED on a shared ubuntu-latest runner. It builds
+# everything and runs only the tests labelled outside "root" (ctest -LE
+# root) - namespace/cgroup/network/mount tests need real root and a kernel
+# configuration this runner does not guarantee, so we do not pretend to run
+# them here. Privileged integration coverage happens on a real (WSL or bare
+# metal) host via scripts/wsl-build.sh + scripts/check-environment.sh.
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            cmake \
+            pkg-config \
+            libcap-dev \
+            libseccomp-dev \
+            libgtest-dev \
+            libgmock-dev \
+            iproute2 \
+            iptables
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DMC_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test (unprivileged only)
+        run: |
+          ctest --test-dir build --output-on-failure -LE root
+
+  child-purity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Enforces the rule logging.h and container.h both state: code running
+      # between clone() and execve() must not allocate. A violation there is a
+      # container that hangs forever with no diagnostic, which is exactly the
+      # kind of bug that is cheap to prevent and miserable to debug.
+      - name: Check child-side purity
+        run: bash scripts/check-child-purity.sh
+
+  clang-format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          files=$(find include src tests -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) 2>/dev/null || true)
+          if [ -z "${files}" ]; then
+            echo "No C++ sources yet; nothing to format-check."
+            exit 0
+          fi
+          fail=0
+          for f in ${files}; do
+            if ! clang-format --dry-run --Werror "${f}"; then
+              fail=1
+            fi
+          done
+          exit "${fail}"

@@ -1,0 +1,6 @@
+# Shell scripts must keep LF endings or bash in WSL fails with '\r: command not found'
+*.sh   text eol=lf
+*.bash text eol=lf
+Makefile text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf

@@ -1,0 +1,48 @@
+---
+# Google C++ style, 80 columns. Applies to all of include/ and src/.
+BasedOnStyle: Google
+Language: Cpp
+Standard: c++20
+ColumnLimit: 80
+IndentWidth: 2
+AccessModifierOffset: -1
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BinPackArguments: true
+BinPackParameters: true
+BreakBeforeBraces: Attach
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4
+Cpp11BracedListStyle: true
+DerivePointerAlignment: false
+PointerAlignment: Left
+ReferenceAlignment: Left
+FixNamespaceComments: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<(sys|linux|net|arpa)/'
+    Priority: 1
+    SortPriority: 1
+  - Regex: '^<[a-z_]+\.h>'
+    Priority: 2
+    SortPriority: 2
+  - Regex: '^<[a-z_]+>'
+    Priority: 3
+    SortPriority: 3
+  - Regex: '^"minicontainer/'
+    Priority: 4
+    SortPriority: 4
+  - Regex: '^"'
+    Priority: 5
+    SortPriority: 5
+IndentCaseLabels: true
+IndentPPDirectives: None
+NamespaceIndentation: None
+SortIncludes: CaseSensitive
+SortUsingDeclarations: true
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+SpacesBeforeTrailingComments: 2
+UseTab: Never

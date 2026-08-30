@@ -1,0 +1,22 @@
+# Build trees (canonical build lives in WSL ext4: ~/mc-build)
+build/
+build-*/
+cmake-build-*/
+compile_commands.json
+
+# Container artifacts - MUST NOT be committed and MUST NOT live on drvfs
+rootfs/
+*.tar
+*.tar.gz
+*.tar.xz
+
+# Tooling
+.cache/
+.vscode/
+.idea/
+*.o
+*.a
+*.so
+
+# Benchmark raw output (results summaries ARE committed)
+benchmarks/**/raw/

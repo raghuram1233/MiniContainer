@@ -184,9 +184,18 @@ Expected<LaunchResult> launch_container(const ContainerConfig& config,
                         : MC_TRY(allocate_ip(config.network, {}));
 
     // The child needs these as arena strings, not std::string.
+    //
+    // ctx->veth_name is deliberately the TEMPORARY name create_veth_pair
+    // actually used (see veth_peer_temp_name), not alloc.veth_container
+    // ("eth0"): that is the name the interface still has when the child looks
+    // for it right after landing in the new netns. step_configure_address
+    // renames it to "eth0" from there - the host's own naming (which may well
+    // already have an "eth0") is irrelevant once the interface is alone in its
+    // own namespace.
     ctx->container_ip_cidr = arena_put(*ctx, alloc.ip_cidr.c_str());
     ctx->gateway_ip = arena_put(*ctx, alloc.gateway.c_str());
-    ctx->veth_name = arena_put(*ctx, alloc.veth_container.c_str());
+    ctx->veth_name =
+        arena_put(*ctx, veth_peer_temp_name(alloc.veth_host).c_str());
     if (ctx->container_ip_cidr == nullptr || ctx->gateway_ip == nullptr ||
         ctx->veth_name == nullptr) {
       return Err(Error::invalid(

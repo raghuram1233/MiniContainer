@@ -3,7 +3,7 @@
 This document describes MiniContainer's design as expressed in the frozen
 Tier-0 headers (`include/minicontainer/{errors,logging,config,syscall,
 process}.h`). It is architecture, not a status report - for what is actually
-implemented, see the README's Status section and `docs/feature-matrix.md`.
+implemented, see the README's Status section and Feature Matrix.
 
 ## Design principle: the parent/child split
 

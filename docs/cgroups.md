@@ -144,8 +144,7 @@ process table.
 Pins the cgroup's tasks to a specific set of CPU cores (e.g. `"0-3"` or
 `"0,2,4"`), unlike `cpu.max`'s time-slicing on any core. Requires the
 `cpuset` controller to be delegated separately from `cpu`. Useful for
-benchmarking with cache/NUMA effects controlled for — see
-`docs/benchmarking.md`.
+benchmarking with cache/NUMA effects controlled for.
 
 ## `CLONE_INTO_CGROUP`: why creation order matters
 

@@ -426,3 +426,39 @@ TEST(NetWslTest, HandlesShortAndEmptyStrings) {
   EXPECT_FALSE(osrelease_indicates_wsl("microsof"));
   EXPECT_TRUE(osrelease_indicates_wsl("microsoft"));
 }
+
+// ---------------------------------------------------------------------------
+// veth_peer_temp_name - the fix for a real bug found while first exercising
+// bridge networking end to end: create_veth_pair used to name the
+// container-side peer literally "eth0", but both ends of a veth pair briefly
+// exist in the HOST namespace during creation, and "eth0" is exactly the name
+// a real host is likely to already have (a WSL2 VM's own adapter, a cloud
+// VM's primary NIC). Creating an interface with that name then failed with
+// EEXIST on any such host - which is most of them. This is the deterministic,
+// no-root half of the regression; tests/network/test_network_priv.cpp proves
+// the fix end to end against a real kernel.
+// ---------------------------------------------------------------------------
+TEST(VethPeerTempNameTest, NeverReturnsTheCollidingLiteral) {
+  // The one property that matters most: whatever this returns must never be
+  // "eth0", or the exact bug this exists to fix comes right back.
+  EXPECT_NE(mc::veth_peer_temp_name("mc-a1b2c3d4e5f6"), "eth0");
+}
+
+TEST(VethPeerTempNameTest, DiffersFromItsInputAndKeepsTheLength) {
+  // Must differ from veth_host too - the same call site uses both names, and
+  // an interface cannot be created twice under one name.
+  const std::string host = "mc-a1b2c3d4e5f6";
+  const std::string peer = mc::veth_peer_temp_name(host);
+  EXPECT_NE(peer, host);
+  EXPECT_EQ(peer.size(), host.size())
+      << "must stay within IFNAMSIZ, same as veth_host already does";
+}
+
+TEST(VethPeerTempNameTest, IsDeterministic) {
+  // launch.cpp derives ctx->veth_name from this function independently of
+  // create_veth_pair's own call to it; if the two ever produced different
+  // names for the same veth_host, the child would look for an interface that
+  // does not exist under the name it expects.
+  const std::string host = "mc-deadbeefcafe";
+  EXPECT_EQ(mc::veth_peer_temp_name(host), mc::veth_peer_temp_name(host));
+}

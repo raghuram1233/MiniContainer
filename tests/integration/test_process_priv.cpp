@@ -353,6 +353,32 @@ TEST(NamespaceJoin, OpenAndJoinOwnUtsNamespaceSucceeds) {
 }
 
 // ---------------------------------------------------------------------------
+// Regression: joining your OWN current user namespace used to fail.
+//
+// The kernel refuses setns(CLONE_NEWUSER) when the caller is already a member
+// of the target user namespace - EINVAL, not a silent no-op the way the other
+// namespace types tolerate self-join (see the UTS test just above). A
+// container started without --userns lives in the SAME user namespace as
+// whatever process calls exec on it, which is the default/common case, so
+// this was not a corner case: it broke `exec` against every ordinary
+// container and only worked against ones that had opted into a user
+// namespace. join_namespace() now detects same-namespace via the (dev, ino)
+// pair namespaces(7) documents and short-circuits to success rather than
+// calling setns() at all.
+// ---------------------------------------------------------------------------
+TEST(NamespaceJoin, OpenAndJoinOwnUserNamespaceSucceeds) {
+  MC_REQUIRE_ROOT();
+
+  Expected<Fd> ns = open_namespace(::getpid(), NsType::User);
+  ASSERT_TRUE(ns.has_value()) << ns.error().message();
+  EXPECT_TRUE(ns->valid());
+
+  Expected<void> joined = join_namespace(ns.value(), NsType::User);
+  EXPECT_TRUE(joined.has_value())
+      << (joined.has_value() ? std::string() : joined.error().message());
+}
+
+// ---------------------------------------------------------------------------
 // run_init_shim forwards a signal it receives to the tracked child.
 //
 // This is the other half of the shim's reason to exist. Inside a PID

@@ -96,23 +96,38 @@ Expected<std::string> allocate_ip(const NetworkConfig& net,
           " already allocated); remove some containers or widen the subnet"));
 }
 
+std::string veth_peer_temp_name(const std::string& veth_host) {
+  // veth_host is always "mc-" + 12 hex chars (launch.cpp's convention), so
+  // swapping the second letter yields "mp-" + the same 12 hex chars: the
+  // same length (already within IFNAMSIZ), guaranteed different from
+  // veth_host, and virtually certain not to collide with a real interface on
+  // any host, unlike the literal "eth0" this replaces.
+  std::string temp = veth_host;
+  if (temp.size() >= 2) {
+    temp[1] = 'p';
+  }
+  return temp;
+}
+
 Expected<void> create_veth_pair(const NetworkAllocation& alloc, ::pid_t pid) {
+  const std::string peer = veth_peer_temp_name(alloc.veth_host);
+
   MC_CHECK(validate_ifname(alloc.veth_host, Op::CreateVeth));
-  MC_CHECK(validate_ifname(alloc.veth_container, Op::CreateVeth));
+  MC_CHECK(validate_ifname(peer, Op::CreateVeth));
 
   // Creating the pair names both ends at once; there is no way to create one
   // half. Both names must therefore be free, and a leftover interface from a
-  // crashed run is the usual reason this fails with EEXIST.
-  MC_CHECK(run_checked(Op::CreateVeth,
-                       {"ip", "link", "add", alloc.veth_host, "type", "veth",
-                        "peer", "name", alloc.veth_container}));
+  // crashed run is the usual reason this fails with EEXIST. The peer is
+  // deliberately NOT alloc.veth_container ("eth0") - see veth_peer_temp_name.
+  MC_CHECK(run_checked(Op::CreateVeth, {"ip", "link", "add", alloc.veth_host,
+                                        "type", "veth", "peer", "name", peer}));
 
   // Move the peer into the target namespace. After this the container end is
   // invisible to the host, which is why teardown cannot address it by name -
   // it deletes the HOST end, and the kernel removes the peer along with it.
-  Expected<void> moved = run_checked(
-      Op::MoveVethToNetns, {"ip", "link", "set", alloc.veth_container, "netns",
-                            std::to_string(pid)});
+  Expected<void> moved =
+      run_checked(Op::MoveVethToNetns,
+                  {"ip", "link", "set", peer, "netns", std::to_string(pid)});
   if (!moved) {
     // The pair exists but is stranded in the host namespace. Remove it before
     // returning, or the next attempt fails with EEXIST on a name that looks

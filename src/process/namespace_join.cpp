@@ -18,6 +18,8 @@
 //      produces a child whose pid (and pid 1-ness) is relative to the new
 //      namespace.
 
+#include <sys/stat.h>
+
 #include <fcntl.h>
 #include <sched.h>
 #include <unistd.h>
@@ -78,6 +80,27 @@ const char* ns_proc_name(NsType t) noexcept {
 }
 
 namespace {
+
+// Whether ns_fd refers to the SAME namespace instance as the calling
+// process's own current one, per the (device, inode) pair namespaces(7)
+// documents as a unique identifier for a live namespace. Returns false (never
+// aborts the join) on any stat() failure, so an inability to tell defers to
+// setns() itself for the real error rather than masking one.
+bool same_as_current_namespace(const Fd& ns_fd, NsType type) noexcept {
+  struct ::stat target_st {};
+  if (::fstat(ns_fd.get(), &target_st) != 0) {
+    return false;
+  }
+  const std::string self_path =
+      std::string("/proc/self/ns/") + ns_proc_name(type);
+  struct ::stat self_st {};
+  if (::stat(self_path.c_str(), &self_st) != 0) {
+    return false;
+  }
+  return target_st.st_dev == self_st.st_dev &&
+         target_st.st_ino == self_st.st_ino;
+}
+
 int clone_flag_for(NsType t) noexcept {
   switch (t) {
     case NsType::Pid:
@@ -112,6 +135,18 @@ Expected<Fd> open_namespace(::pid_t pid, NsType type) {
 }
 
 Expected<void> join_namespace(const Fd& ns_fd, NsType type) {
+  // Joining a namespace the caller is already a member of is, semantically,
+  // already done - and for the user namespace specifically the kernel
+  // actively refuses the setns() call in that case (EINVAL) rather than
+  // treating it as the no-op every other namespace type tolerates. A
+  // container started without --userns lives in the SAME user namespace as
+  // the caller (there is no separate one to join, since SecurityConfig::userns
+  // defaults to false), which is the common case - so without this check,
+  // `exec` failed against every ordinary container and only worked against
+  // ones that had opted into a user namespace.
+  if (same_as_current_namespace(ns_fd, type)) {
+    return Ok();
+  }
   if (::setns(ns_fd.get(), clone_flag_for(type)) < 0) {
     return Err(
         Error::syscall(Op::JoinNamespace, "setns", errno, ns_type_name(type)));

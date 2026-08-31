@@ -14,38 +14,52 @@ is being *correct and honest* about the mechanisms it implements.
 
 ## Status
 
-**Complete and working.** MiniContainer creates and runs containers. Verified
-on Ubuntu 24.04 / WSL2, not merely asserted:
+**Complete and working, including networking.** MiniContainer creates and
+runs containers, with a real bridge network and real `exec` into a live
+container, both verified end-to-end on Ubuntu 24.04 / WSL2 — not merely
+asserted:
 
 ```
-$ minicontainer run --rootfs ~/rootfs --hostname boxy --memory 64M /bin/sh -c '...'
+$ minicontainer run --rootfs ~/rootfs --network bridge --hostname boxy --memory 64M /bin/sh -c '...'
 hostname : boxy            # host is "Raghu": UTS namespace works
 pid      : 2               # PID 1 is the init shim; the host shell was 269
 processes: 5               # its own /proc, not the host's hundreds
-root     : bin dev etc home lib lib64 proc root sbin sys tmp usr var
-devices  : full null pts random tty urandom zero
+eth0     : 10.88.0.2/16, default route via 10.88.0.1
+ping 8.8.8.8  ->  0% packet loss  (real internet access, through NAT)
 
 $ cat /sys/fs/cgroup/minicontainer/<id>/memory.max     # read from the HOST
 67108864                   # exactly the 64M that was asked for
+
+$ minicontainer exec boxy /bin/sh -c 'hostname; echo pid=$$'
+boxy                        # exec joins the SAME namespaces run created
+pid=3
 ```
 
-Every subcommand is implemented. **285 tests pass**, the tree is warning-free
-under `-Werror`, and it is clean under ASan + UBSan.
+Every subcommand is implemented and proven end-to-end. **296 tests pass**,
+the tree is warning-free under `-Werror`, and it is clean under ASan + UBSan.
 
-| Verified working | Implemented but unproven |
+| Verified working | Not in scope |
 |---|---|
-| `run`, `create`, `start`, `stop`, `kill`, `rm`, `logs` | Bridge networking (veth, NAT, `-p`) — only `--network none` has been run end to end |
-| `ps`, `inspect`, `stats`, `version`, `help` | `exec` — joins namespaces and forks, but not yet exercised against a live container |
-| PID / UTS / mount / IPC / network / user namespaces | `--seccomp=profile` from a file (returns `Op::Unsupported`; the built-in deny list works) |
+| `run`, `create`, `start`, `stop`, `kill`, `rm`, `logs`, `exec` | OCI bundles, image layers, a registry |
+| `ps`, `inspect`, `stats`, `version`, `help` | Benchmark numbers — not measured yet |
+| PID / UTS / mount / IPC / network / user namespaces | |
 | `pivot_root`, `/proc` `/sys` `/dev` `/dev/pts` `/tmp`, device nodes | |
-| cgroup v2 memory, cpu, pids, cpuset limits | |
-| Capability dropping, `no_new_privs`, seccomp deny list | |
+| cgroup v2 memory, cpu, pids, cpuset limits, read back from the host | |
+| Capability dropping, `no_new_privs`, seccomp deny list (built-in or `--seccomp <PATH>` custom profile) | |
+| Bridge networking: veth, NAT, outbound internet, DNAT port publishing | |
 | State persisted to `state.json`; exit codes forwarded | |
 
-Not in scope, deliberately: OCI bundles, image layers, a registry, and
-benchmark numbers. See [Limitations](#limitations).
+Two real bugs turned up the first time bridge networking and `exec` were
+actually exercised end-to-end, and both are fixed: `create_veth_pair` used to
+name the container-side interface literally `"eth0"`, which collides with the
+host's own adapter of that name on WSL2 and most cloud VMs (both ends of a
+veth pair briefly exist in the host namespace during creation); and `exec`
+used to fail joining the user namespace of any container started without
+`--userns` (the common case), because the kernel refuses `setns(CLONE_NEWUSER)`
+into a namespace the caller is already a member of. Both have regression tests.
 
-The Status section above is authoritative.
+See [Limitations](#limitations) for what is genuinely out of scope. The
+Status section above is authoritative.
 
 ---
 
@@ -345,9 +359,9 @@ Test-to-implementation ratio: **1 : 1.9**.
 
 | Metric | Value |
 |---|---:|
-| Total tests | 285 |
-| Unprivileged (`-LE root`) | 270 |
-| Privileged (`-L root`) | 15 |
+| Total tests | 296 |
+| Unprivileged (`-LE root`) | 277 |
+| Privileged (`-L root`) | 19 |
 | Failures | 0 |
 
 The privileged suite creates real namespaces, real cgroups and real processes.
@@ -410,7 +424,7 @@ capability name allocates freely, applying the resulting mask must not.
 
 **Parsing is pure.** `parse_args()` makes no syscalls beyond reading argv, so
 the entire CLI and all of configuration validation are unit-testable without
-root. That is why 101 of 109 tests need no privileges at all.
+root. That is why 277 of 296 tests need no privileges at all.
 
 Full tier structure and the reason for every dependency edge is in
 `docs/dependency-graph.md`.
@@ -420,17 +434,24 @@ Full tier structure and the reason for every dependency edge is in
 ## Repository layout
 
 ```
-include/minicontainer/   Frozen Tier-0 headers (errors, logging, config,
-                         syscall, process, cli)
-src/core/                errors, logging, config, syscall implementations
+include/minicontainer/   All Tier-0/1/2 headers: errors, logging, config,
+                         syscall, process, cli, container, filesystem,
+                         security, cgroup, network, json, runtime
+src/core/                errors, logging, config, syscall, json implementations
 src/cli/                 parser.cpp, commands.cpp, main.cpp
 src/process/             clone3, fd/pipe RAII, init shim, setns, wait
-src/child/               post-clone code (empty — Wave 2)
-src/{namespace,filesystem,cgroup,network,security,runtime}/
-                         empty — Wave 2 and beyond
-tests/unit/              Unprivileged GoogleTest suites
-tests/integration/       Privileged suites (ctest label "root")
-scripts/                 wsl-build, check-environment, create-rootfs, cleanup
+src/container/           the child setup contract: context, step table, and
+                         launch_container - where every module below meets
+src/filesystem/          mount, pivot_root, rootfs validation
+src/cgroup/              cgroup v2 limits, delegation probing, stats
+src/security/            capability dropping, seccomp
+src/network/             bridge, veth, NAT/DNAT, child-side address config
+src/runtime/             state store (state.json), lifecycle, output formatting
+tests/unit/              273 unprivileged GoogleTest cases
+tests/{integration,filesystem,cgroup,network,security}/
+                         19 privileged cases (ctest label "root")
+scripts/                 wsl-build, check-environment, create-rootfs, cleanup,
+                         check-child-purity (CI-enforced no-alloc rule)
 docs/                    Per-mechanism teaching docs + feature matrix
 cmake/                   Warning and sanitizer helper modules
 ```
@@ -449,12 +470,10 @@ cmake/                   Warning and sanitizer helper modules
 | Cgroups v2 (limits, delegation probing, stats) | Done |
 | Security (capabilities, seccomp deny list, `no_new_privs`) | Done |
 | Lifecycle (`run`/`stop`/`kill`/`ps`/`inspect`/`stats`/`logs`/`rm`) | Done |
-| Networking (veth, bridge, NAT, WSL2 port publish) | Partial — implemented, only `--network none` proven |
-| `exec` (setns into a live container) | Partial — implemented, not yet exercised |
-| Seccomp profiles loaded from a file | Planned |
+| Networking (veth, bridge, NAT, WSL2 port publish) | Done — proven end to end, including outbound internet through NAT |
+| `exec` (setns into a live container) | Done — proven end to end against a running container |
+| Seccomp profiles loaded from a file | Done — `--seccomp <PATH>`, plain-text deny list |
 | OCI bundles, image layers, benchmarking | Planned — out of scope for now |
-
-Full detail in `docs/feature-matrix.md`.
 
 ---
 
@@ -511,7 +530,6 @@ These are deliberate, not bugs to file:
 
 | Document | Contents |
 |---|---|
-| `docs/feature-matrix.md` | Per-feature Done/Partial/Planned table |
 | `docs/architecture.md` | Module structure and the error/logging model |
 | `docs/dependency-graph.md` | Tier structure and why each edge exists |
 | `docs/getting-started.md` | Full WSL2 setup walkthrough |
@@ -525,15 +543,12 @@ These are deliberate, not bugs to file:
 
 ## Roadmap
 
-The runtime is feature-complete for what it set out to do. What remains is
-proving and extending it:
+The runtime is feature-complete and every path is proven end to end,
+including networking, `exec`, and custom seccomp profiles. What remains is
+optional extension, not finishing anything unproven, and is out of scope for
+now:
 
-1. **Exercise bridge networking end to end** and fix what that turns up — it
-   is the largest piece of code with no runtime evidence behind it.
-2. **Exercise `exec`** against a live container.
-3. **Seccomp profiles from a file** (`--seccomp=profile`).
-4. **Benchmark against `runc`**, following `docs/benchmarking.md`'s
-   methodology. Not against Docker: that comparison is not like-for-like, and
-   the document explains why.
-5. Minimal OCI bundle support, if the project ever wants to run images other
+1. **Benchmark against `runc`**, not Docker — that comparison is not
+   like-for-like.
+2. Minimal OCI bundle support, if the project ever wants to run images other
    people built.

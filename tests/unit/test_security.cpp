@@ -16,6 +16,8 @@
 
 #include <linux/capability.h>
 
+#include <unistd.h>
+
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -56,6 +58,29 @@ mc::SecurityConfig sec_with(std::vector<std::string> drop,
   sec.cap_add = std::move(add);
   return sec;
 }
+
+// A scratch file for --seccomp <PATH> tests: mkstemp'd so parallel test
+// binaries never collide, unlinked unconditionally in the destructor.
+class TempFile {
+ public:
+  explicit TempFile(const std::string& content) {
+    char tmpl[] = "/tmp/mc-test-seccomp-XXXXXX";
+    const int fd = ::mkstemp(tmpl);
+    path_ = tmpl;
+    if (fd >= 0) {
+      (void)::write(fd, content.data(), content.size());
+      ::close(fd);
+    }
+  }
+  ~TempFile() { ::unlink(path_.c_str()); }
+  TempFile(const TempFile&) = delete;
+  TempFile& operator=(const TempFile&) = delete;
+
+  const std::string& path() const { return path_; }
+
+ private:
+  std::string path_;
+};
 
 }  // namespace
 
@@ -399,17 +424,88 @@ TEST(SeccompProgramTest, DefaultModeIsDeterministic) {
                            a->seccomp_insn_count * 8));
 }
 
-TEST(SeccompProgramTest, ProfileModeIsReportedAsNotImplemented) {
-  // --seccomp=profile parses but is not wired up yet. It must fail loudly:
-  // falling back to the default profile would silently ignore the file the
-  // user pointed at.
+TEST(SeccompProgramTest, ProfileModeMissingFileIsAnError) {
+  // A path that does not exist must fail loudly rather than silently falling
+  // back to the built-in profile - falling back would mean the container
+  // runs with different filtering than the user asked for and no indication
+  // anything was wrong.
   mc::SecurityConfig sec;
   sec.seccomp = mc::SeccompMode::Profile;
-  sec.seccomp_profile_path = "/nonexistent/profile.json";
+  sec.seccomp_profile_path = "/nonexistent/mc-test-profile-does-not-exist";
   auto ctx = fresh_context();
 
   const mc::Expected<void> r = mc::build_seccomp_program(sec, *ctx);
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().op(), mc::Op::InstallSeccomp);
+}
+
+TEST(SeccompProgramTest, ProfileModeEmptyFileIsAnError) {
+  // A file with nothing but comments and blank lines names zero syscalls to
+  // deny; installing that would be an allow-everything filter presented to
+  // the user as "your seccomp profile is active." That must fail, not
+  // silently do nothing.
+  TempFile profile(
+      "# nothing here\n"
+      "\n"
+      "   \n");
+  mc::SecurityConfig sec;
+  sec.seccomp = mc::SeccompMode::Profile;
+  sec.seccomp_profile_path = profile.path();
+  auto ctx = fresh_context();
+
+  const mc::Expected<void> r = mc::build_seccomp_program(sec, *ctx);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().op(), mc::Op::InstallSeccomp);
+}
+
+TEST(SeccompProgramTest, ProfileModeBuildsAProgramFromACustomFile) {
+  // The whole feature: a real file naming real syscalls compiles to a real
+  // BPF program, the same way --seccomp=default does.
+  TempFile profile(
+      "# deny just these two\n"
+      "ptrace\n"
+      "\n"
+      "reboot  # trailing comment\n");
+  mc::SecurityConfig sec;
+  sec.seccomp = mc::SeccompMode::Profile;
+  sec.seccomp_profile_path = profile.path();
+  auto ctx = fresh_context();
+
+  const mc::Expected<void> r = mc::build_seccomp_program(sec, *ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message();
+  EXPECT_TRUE(ctx->install_seccomp);
+  EXPECT_GT(ctx->seccomp_insn_count, 0u);
+  EXPECT_LE(ctx->seccomp_insn_count, mc::kMaxSeccompInsns);
+}
+
+TEST(SeccompProgramTest, ProfileModeSkipsUnknownSyscallNamesRatherThanFailing) {
+  // Same tolerance the built-in list has always had: a name that does not
+  // resolve on this architecture (typo, or a syscall from a different arch)
+  // is dropped rather than aborting the whole profile - as long as at least
+  // one real syscall remains, which "ptrace" here guarantees.
+  TempFile profile("ptrace\nnot_a_real_syscall_name\n");
+  mc::SecurityConfig sec;
+  sec.seccomp = mc::SeccompMode::Profile;
+  sec.seccomp_profile_path = profile.path();
+  auto ctx = fresh_context();
+
+  const mc::Expected<void> r = mc::build_seccomp_program(sec, *ctx);
+  ASSERT_TRUE(r.has_value()) << r.error().message();
+  EXPECT_TRUE(ctx->install_seccomp);
+}
+
+TEST(SeccompProgramTest, ProfileModeIsDeterministic) {
+  TempFile profile("ptrace\nreboot\nunshare\n");
+  mc::SecurityConfig sec;
+  sec.seccomp = mc::SeccompMode::Profile;
+  sec.seccomp_profile_path = profile.path();
+  auto a = fresh_context();
+  auto b = fresh_context();
+
+  ASSERT_TRUE(mc::build_seccomp_program(sec, *a).has_value());
+  ASSERT_TRUE(mc::build_seccomp_program(sec, *b).has_value());
+  ASSERT_EQ(a->seccomp_insn_count, b->seccomp_insn_count);
+  EXPECT_EQ(0, std::memcmp(a->seccomp_insns, b->seccomp_insns,
+                           a->seccomp_insn_count * 8));
 }
 #endif  // MC_ENABLE_SECCOMP

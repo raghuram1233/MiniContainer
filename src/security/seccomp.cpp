@@ -35,6 +35,8 @@
 
 #include <cstddef>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 #include "minicontainer/container.h"
@@ -78,9 +80,25 @@ struct DeniedSyscall {
   int number;
 };
 
-std::vector<DeniedSyscall> denied_syscalls() {
-  // Resolved by name, so a syscall that does not exist on this architecture is
-  // skipped rather than aborting the whole profile.
+// Resolves a list of syscall names to (name, number) pairs, dropping any name
+// that does not exist on this architecture rather than aborting the whole
+// profile - the same tolerance the built-in list has always had, now shared
+// with a custom one. `names` must outlive the returned vector: each entry's
+// `name` points into a string owned by the caller.
+std::vector<DeniedSyscall> resolve_denied_syscalls(
+    const std::vector<std::string>& names) {
+  std::vector<DeniedSyscall> out;
+  out.reserve(names.size());
+  for (const std::string& name : names) {
+    const int nr = ::seccomp_syscall_resolve_name(name.c_str());
+    if (nr != __NR_SCMP_ERROR) {
+      out.push_back({name.c_str(), nr});
+    }
+  }
+  return out;
+}
+
+std::vector<std::string> default_denied_syscall_names() {
   static const char* const kNames[] = {
       // Mount and root manipulation: setup is already done; there is no
       // legitimate reason for the container to remount anything.
@@ -135,15 +153,50 @@ std::vector<DeniedSyscall> denied_syscalls() {
       "ioperm",
   };
 
-  std::vector<DeniedSyscall> out;
-  out.reserve(sizeof(kNames) / sizeof(kNames[0]));
-  for (const char* name : kNames) {
-    const int nr = ::seccomp_syscall_resolve_name(name);
-    if (nr != __NR_SCMP_ERROR) {
-      out.push_back({name, nr});
-    }
+  return std::vector<std::string>(std::begin(kNames), std::end(kNames));
+}
+
+// Loads a custom deny list for --seccomp <PATH>: one syscall name per line,
+// "#" starts a comment to end of line, blank lines are skipped. Deliberately
+// plain text rather than JSON - this project has no JSON dependency (see
+// docs on mc::Expected replacing std::expected for the same "no new
+// dependency" reasoning), and a name-per-line list is the entire vocabulary
+// this profile format needs.
+Expected<std::vector<std::string>> load_denied_syscall_names(
+    const std::string& path) {
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    return Err(Error::syscall(Op::InstallSeccomp, "open", errno, path));
   }
-  return out;
+
+  std::vector<std::string> names;
+  std::string line;
+  while (std::getline(file, line)) {
+    const std::size_t hash = line.find('#');
+    if (hash != std::string::npos) {
+      line.erase(hash);
+    }
+    const std::size_t start = line.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) {
+      continue;
+    }
+    const std::size_t end = line.find_last_not_of(" \t\r\n");
+    names.push_back(line.substr(start, end - start + 1));
+  }
+
+  // An empty result would silently install an allow-everything filter - the
+  // user asked for a profile and got no filtering at all, which must be an
+  // error, not a quiet no-op.
+  if (names.empty()) {
+    return Err(Error::invalid(
+        Op::InstallSeccomp,
+        "seccomp profile " + path +
+            " named no syscalls to deny (blank lines and '#' comments are "
+            "skipped); an empty profile would run the container "
+            "unfiltered, which --seccomp=" +
+            path + " did not ask for"));
+  }
+  return names;
 }
 
 // Reads libseccomp's BPF export back into memory. seccomp_export_bpf writes to
@@ -214,12 +267,14 @@ Expected<void> build_seccomp_program(const SecurityConfig& sec,
       "without a filter - which is less safe, and is why it is not the "
       "default"));
 #else
-  if (sec.seccomp == SeccompMode::Profile) {
-    return Err(Error::unsupported(
-        Op::InstallSeccomp,
-        "loading a seccomp profile from a file is not implemented yet; "
-        "--seccomp=default uses the built-in deny list"));
-  }
+  // Profile mode reads its own name list from disk; Default uses the
+  // built-in one. Both then go through the exact same compile-and-export
+  // path below, so a custom profile gets the same guarantees (deterministic
+  // BPF, size-checked against ChildContext) as the built-in one.
+  const std::vector<std::string> names =
+      (sec.seccomp == SeccompMode::Profile)
+          ? MC_TRY(load_denied_syscall_names(sec.seccomp_profile_path))
+          : default_denied_syscall_names();
 
   // Default action ALLOW with explicit denials - the deny-list trade
   // documented above.
@@ -230,7 +285,7 @@ Expected<void> build_seccomp_program(const SecurityConfig& sec,
   }
   ScopeGuard release([sctx] { ::seccomp_release(sctx); });
 
-  for (const DeniedSyscall& sc : denied_syscalls()) {
+  for (const DeniedSyscall& sc : resolve_denied_syscalls(names)) {
     // EPERM rather than SCMP_ACT_KILL: a killed process gives the user a bare
     // SIGSYS with no indication of which syscall died, whereas EPERM surfaces
     // as an ordinary "operation not permitted" the program can report itself.

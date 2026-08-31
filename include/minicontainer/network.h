@@ -66,6 +66,19 @@ Expected<std::string> allocate_ip(const NetworkConfig& net,
 // be called after clone() and before releasing the child.
 Expected<void> create_veth_pair(const NetworkAllocation& alloc, ::pid_t pid);
 
+// The name the container-side end of the pair is actually created with in the
+// HOST namespace, before it is moved. This is deliberately NOT
+// alloc.veth_container ("eth0"): both ends of a veth pair briefly exist in the
+// host namespace during creation, and "eth0" is exactly the name a real host
+// is likely to already have (a WSL2 VM's own adapter, a cloud VM's primary
+// NIC) - creating an interface with that name then fails with EEXIST. The
+// container only ever sees "eth0"; step_configure_address renames this
+// temporary interface to that literal immediately after it lands in the new
+// netns, where the host's own naming is no longer relevant. Derived from
+// veth_host so the parent (setting ctx.veth_name) and create_veth_pair (doing
+// the actual creation) always agree without passing the name separately.
+std::string veth_peer_temp_name(const std::string& veth_host);
+
 // Attaches the host end to the bridge and brings it up.
 Expected<void> attach_to_bridge(const NetworkAllocation& alloc);
 

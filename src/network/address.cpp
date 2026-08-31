@@ -126,6 +126,21 @@ bool bring_up(int sock, const char* ifname) noexcept {
   return ::ioctl(sock, SIOCSIFFLAGS, &req) == 0;
 }
 
+// Renames the interface currently called `old_name` to `new_name`, via
+// SIOCSIFNAME. Used to turn the collision-safe temporary name the veth peer
+// was created with on the host (see network.h's veth_peer_temp_name) into the
+// literal "eth0" every container is meant to see - that rename only becomes
+// safe once the interface is alone in its own netns, which is exactly where
+// this runs. The interface must be down for SIOCSIFNAME to succeed, which it
+// still is here: nothing has brought it up yet.
+bool rename_interface(int sock, const char* old_name,
+                      const char* new_name) noexcept {
+  struct ::ifreq req {};
+  std::strncpy(req.ifr_name, old_name, IFNAMSIZ - 1);
+  std::strncpy(req.ifr_newname, new_name, IFNAMSIZ - 1);
+  return ::ioctl(sock, SIOCSIFNAME, &req) == 0;
+}
+
 }  // namespace
 
 ChildStatus step_configure_address(const ChildContext& ctx) noexcept {
@@ -156,8 +171,20 @@ ChildStatus step_configure_address(const ChildContext& ctx) noexcept {
     return ChildStatus::fail(Op::ConfigureAddress, EINVAL);
   }
 
+  // ctx.veth_name still holds the collision-safe temporary name it was
+  // created with in the HOST namespace (see network.h's veth_peer_temp_name);
+  // now that it is alone in this netns, rename it to the literal every
+  // container is meant to see. From here on the interface is addressed as
+  // "eth0", never as ctx.veth_name again.
+  constexpr const char* kContainerIfName = "eth0";
+  if (!rename_interface(sock, ctx.veth_name, kContainerIfName)) {
+    const int err = errno;
+    ::close(sock);
+    return ChildStatus::fail(Op::ConfigureAddress, err);
+  }
+
   struct ::ifreq req {};
-  std::strncpy(req.ifr_name, ctx.veth_name, IFNAMSIZ - 1);
+  std::strncpy(req.ifr_name, kContainerIfName, IFNAMSIZ - 1);
 
   set_sockaddr(req, addr);
   if (::ioctl(sock, SIOCSIFADDR, &req) != 0) {
@@ -178,7 +205,7 @@ ChildStatus step_configure_address(const ChildContext& ctx) noexcept {
     return ChildStatus::fail(Op::ConfigureAddress, err);
   }
 
-  if (!bring_up(sock, ctx.veth_name)) {
+  if (!bring_up(sock, kContainerIfName)) {
     const int err = errno;
     ::close(sock);
     return ChildStatus::fail(Op::ConfigureAddress, err);
